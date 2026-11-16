@@ -15,7 +15,7 @@
 
 ## 环境要求
 - MyGo Music ≥ 0.1.20
-- 本机装有 **Chrome 或 Edge**（辅助程序 `gd-helper` 用无头浏览器在站点页面上下文内发请求，以通过站点的指纹校验）
+- 本机装有 **Chrome、Edge 或 Chromium**（辅助程序 `gd-helper` 用无头浏览器在站点页面上下文内发请求，以通过站点的指纹校验；可用环境变量 `CHROME_PATH` 指定浏览器）
 - 自行构建 helper 时需要 Go（版本见 `helper-src/go.mod`）
 
 ## 安装
@@ -23,7 +23,7 @@
 
 **macOS / Linux**：下载对应平台的 release zip（`gd-music-plugin-darwin.zip` / `gd-music-plugin-linux.zip`），或自行构建 helper（见下）。
 
-> 平台支持现状：helper 的浏览器自动发现目前只覆盖 **Windows** 路径。macOS / Linux 的浏览器发现尚未补全（见「发布前待办」），在这两个平台上可能需要先补全 `findBrowser()` 才能跑起来。
+> 平台支持现状：helper 的浏览器自动发现已覆盖 Windows / macOS / Linux（含 Chromium，可用 `CHROME_PATH` 覆盖）。macOS / Linux 尚未真机验证，留待使用者反馈；Linux 若以 root 运行无头浏览器可能需自行加 `--no-sandbox`。
 
 ## 从源码构建 helper
 ```bash
@@ -64,10 +64,13 @@ scripts/             本机构建脚本
 ```
 
 ## 发布前待办
-- [ ] 补全 `helper-src/main.go` 的 `findBrowser()`：macOS / Linux 的 Chrome/Edge/Chromium 路径
-- [ ] 确定许可证（仓库暂未附 LICENSE；未附则默认保留所有权利）
-- [ ] 合规确认（第三方音源的服务条款与版权）
-- [ ] macOS / Linux 真机验证（含 arm64；当前 release 二进制为各平台默认架构）
+- [x] 补全 `helper-src/main.go` 的 `findBrowser()`：macOS / Linux 的 Chrome/Edge/Chromium 路径（含 `CHROME_PATH` 覆盖）
+- [x] 许可证：MIT（见 `LICENSE`）
+- [x] 合规确认：GD Studio 方表示提供开发者 API、可自行调用（见下「后续改进」）
+- [ ] macOS / Linux 真机验证（含 arm64）——留待使用者反馈
+
+## 后续改进
+GD Studio 方表示有**开发者 API**。改用官方开发者 API 可去掉无头浏览器这一层，更轻量也更稳妥；当前实现仍走站点页面上下文，作为过渡。
 
 ## 许可证
-待定（TBD）。
+[MIT](LICENSE)。

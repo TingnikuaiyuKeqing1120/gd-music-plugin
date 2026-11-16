@@ -50,7 +50,7 @@ function ensureHelper() {
   try {
     proc = host.spawn(helperPath());
   } catch (e) {
-    throw fail("setup", "请在设置中允许 GD音乐台 启动辅助程序（需要本机装有 Chrome 或 Edge）");
+    throw fail("setup", "请在设置中允许 GD音乐台 启动辅助程序（需要本机装有 Chrome、Edge 或 Chromium）");
   }
   helper = proc;
   // 告知 helper 离线库目录（插件自己的 dataDir/offline），下载与供流都用它。

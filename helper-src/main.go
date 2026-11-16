@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"time"
 
@@ -45,15 +46,47 @@ type pageResult struct {
 	Body   string `json:"body"`
 }
 
+// findBrowser locates a Chrome, Edge or Chromium to drive. CHROME_PATH wins
+// if it points at one; else the usual install places of the running system.
 func findBrowser() string {
-	candidates := []string{
-		filepath.Join(os.Getenv("ProgramFiles"), "Google", "Chrome", "Application", "chrome.exe"),
-		filepath.Join(os.Getenv("ProgramFiles(x86)"), "Google", "Chrome", "Application", "chrome.exe"),
-		filepath.Join(os.Getenv("LocalAppData"), "Google", "Chrome", "Application", "chrome.exe"),
-		filepath.Join(os.Getenv("ProgramFiles(x86)"), "Microsoft", "Edge", "Application", "msedge.exe"),
-		filepath.Join(os.Getenv("ProgramFiles"), "Microsoft", "Edge", "Application", "msedge.exe"),
+	if p := os.Getenv("CHROME_PATH"); p != "" {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	var candidates []string
+	switch runtime.GOOS {
+	case "windows":
+		candidates = []string{
+			filepath.Join(os.Getenv("ProgramFiles"), "Google", "Chrome", "Application", "chrome.exe"),
+			filepath.Join(os.Getenv("ProgramFiles(x86)"), "Google", "Chrome", "Application", "chrome.exe"),
+			filepath.Join(os.Getenv("LocalAppData"), "Google", "Chrome", "Application", "chrome.exe"),
+			filepath.Join(os.Getenv("ProgramFiles(x86)"), "Microsoft", "Edge", "Application", "msedge.exe"),
+			filepath.Join(os.Getenv("ProgramFiles"), "Microsoft", "Edge", "Application", "msedge.exe"),
+		}
+	case "darwin":
+		home, _ := os.UserHomeDir()
+		for _, dir := range []string{"/Applications", filepath.Join(home, "Applications")} {
+			candidates = append(candidates,
+				filepath.Join(dir, "Google Chrome.app", "Contents", "MacOS", "Google Chrome"),
+				filepath.Join(dir, "Microsoft Edge.app", "Contents", "MacOS", "Microsoft Edge"),
+				filepath.Join(dir, "Chromium.app", "Contents", "MacOS", "Chromium"),
+			)
+		}
+	default:
+		candidates = []string{
+			"/usr/bin/google-chrome", "/usr/bin/google-chrome-stable",
+			"/usr/bin/chromium", "/usr/bin/chromium-browser",
+			"/usr/bin/microsoft-edge", "/usr/bin/microsoft-edge-stable",
+			"/snap/bin/chromium",
+			"/opt/google/chrome/chrome",
+			"/opt/microsoft/msedge/msedge",
+		}
 	}
 	for _, p := range candidates {
+		if p == "" {
+			continue
+		}
 		if _, err := os.Stat(p); err == nil {
 			return p
 		}
@@ -116,7 +149,7 @@ func downloadTo(dir, name, url string) (int64, error) {
 func main() {
 	browser := findBrowser()
 	if browser == "" {
-		os.Stderr.WriteString("no Chrome or Edge found\n")
+		os.Stderr.WriteString("no Chrome, Edge or Chromium found\n")
 		os.Exit(1)
 	}
 	dataDir, err := os.MkdirTemp("", "gd-helper-")
