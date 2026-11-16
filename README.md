@@ -4,6 +4,10 @@
 
 > **出处与许可**：本插件使用 GD音乐台 (music.gdstudio.xyz) 的开发者 API，该 API 以 **CC BY-NC 4.0** 提供——**仅限学习、非商用**，使用时请注明出处「GD音乐台 (music.gdstudio.xyz)」。插件代码本身为 MIT。请遵守 API 与各自音源服务的条款，非商用、尊重作者。
 
+## 版本选择
+- **V1（[v1.0.0](https://github.com/TingnikuaiyuKeqing1120/gd-music-plugin/releases/tag/v1.0.0)）**：功能更稳定、全面、可靠，自带离线缓存与封面懒加载。**若不介意使用 helper（需本机装有 Chrome/Edge），推荐 V1。**
+- **V2（当前 main / [v2.0.0](https://github.com/TingnikuaiyuKeqing1120/gd-music-plugin/releases/tag/v2.0.0)）**：纯 JS、零依赖、最轻量；但时长需播放一次后回填、首搜个别封面可能暂缺、离线播放交给 App。
+
 ## 功能
 - 搜索歌曲（音源可选；当前稳定可用 netease / joox / bilibili）
 - 在线播放，音质可选（标准 128k / 高 320k / 无损）
