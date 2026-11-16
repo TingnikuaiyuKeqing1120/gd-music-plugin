@@ -1,0 +1,71 @@
+name: build
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  helper:
+    name: helper (${{ matrix.goos }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            goos: windows
+            ext: .exe
+          - os: ubuntu-latest
+            goos: linux
+            ext: ""
+          - os: macos-latest
+            goos: darwin
+            ext: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: helper-src/go.mod
+      - name: Build helper
+        shell: bash
+        run: |
+          cd helper-src
+          go build -trimpath -ldflags "-s -w" -o "../bin/gd-helper${{ matrix.ext }}" .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: helper-${{ matrix.goos }}
+          path: bin/gd-helper${{ matrix.ext }}
+          if-no-files-found: error
+
+  package:
+    name: package
+    needs: helper
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Assemble per-platform plugin zips
+        shell: bash
+        run: |
+          mkdir -p dist
+          for goos in windows linux darwin; do
+            ext=""; [ "$goos" = windows ] && ext=".exe"
+            stage="dist/gd-music-plugin"
+            mkdir -p "$stage/bin"
+            cp plugin.json index.js "$stage/"
+            cp "artifacts/helper-$goos/gd-helper$ext" "$stage/bin/"
+            (cd dist && zip -rq "gd-music-plugin-$goos.zip" gd-music-plugin)
+            rm -rf "$stage"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plugin-zips
+          path: dist/*.zip
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip
