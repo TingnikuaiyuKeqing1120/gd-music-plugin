@@ -1,28 +1,34 @@
-// GD音乐台 (music.gdstudio.xyz) 音源插件。
-// 站点的 api.php 有 Cloudflare 指纹校验，普通 HTTP 客户端无法通过，
-// 所以请求经由 bin/gd-helper（无头 Chrome/Edge）在站点页面上下文内发出，
-// 签名直接用页面自己的 crc32，站点更新算法或版本号时无需改插件。
+// GD音乐台 音源插件（纯 JS，无辅助程序）。
+// 走 GD Studio 官方开发者 API：https://music-api.gdstudio.xyz/api.php
+// 纯 HTTP GET、无签名、无需浏览器。出处：GD音乐台 (music.gdstudio.xyz)。
+// 该 API 限频 5 分钟 50 次，故所有请求经令牌桶节流，封面解析结果持久缓存。
 //
-// 封面渐进加载：搜索约 1 秒即返回，封面 URL 指向 helper 的本地服务
-// (http://127.0.0.1:<port>/cover)。App 自己并发去抓，helper 收到请求才去
-// GD 解析封面（站点串行、较慢），解析出就 302 跳到 CDN——于是列表先出，
-// 封面一张张补上。helper 内缓存解析结果，App 也按 URL 缓存，重复秒回。
-//
-// 喜欢和歌单都存在本机（host.storage）：GD 没有账号/写入接口，
-// 所以收藏与歌单是设备本地的，换机不会同步。
+// 喜欢、歌单、历史都存在本机（host.storage）：GD 无账号/写入接口，换机不同步。
+// 离线播放交给 App 自身的歌曲缓存与下载管理器，插件不再自有离线层。
 
+const API = "https://music-api.gdstudio.xyz/api.php";
 const COUNT = 20;
 
-// 音质 → GD 码率。离线缓存与播放共用。
+// 音质 → API 码率（128/192/320/740/999；999 为 24bit 无损）。
 const BR = { standard: 128, high: 320, lossless: 999 };
 
-const urlEncode = (s) =>
-  encodeURIComponent(s)
-    .replace(/\(/g, "%28")
-    .replace(/\)/g, "%29")
-    .replace(/\*/g, "%2A")
-    .replace(/'/g, "%27")
-    .replace(/!/g, "%21");
+// 开发者 API 限频：5 分钟 50 次。
+const RATE_MAX = 50;
+const RATE_WINDOW = 300000;
+let stamps = [];
+
+async function slot() {
+  for (;;) {
+    const now = Date.now();
+    stamps = stamps.filter((t) => now - t < RATE_WINDOW);
+    if (stamps.length < RATE_MAX) {
+      stamps.push(now);
+      return;
+    }
+    const wait = RATE_WINDOW - (now - stamps[0]) + 50;
+    await new Promise((r) => setTimeout(r, Math.min(wait, 5000)));
+  }
+}
 
 const fail = (code, message) => {
   const e = new Error(message);
@@ -33,146 +39,85 @@ const fail = (code, message) => {
 const load = (key, fallback) => host.storage.get(key) ?? fallback;
 const save = (key, value) => host.storage.set(key, value);
 
-let helper = null;
-let nextId = 1;
-const pending = new Map();
-let helperBase = "";
-let readyPromise = null;
-let readyResolve = null;
-let readyReject = null;
+const enc = (s) => encodeURIComponent(String(s == null ? "" : s));
 
-const helperPath = () =>
-  host.platform === "win32" ? "bin/gd-helper.exe" : "bin/gd-helper";
-
-function ensureHelper() {
-  if (helper) return helper;
-  let proc;
-  try {
-    proc = host.spawn(helperPath());
-  } catch (e) {
-    throw fail("setup", "请在设置中允许 GD音乐台 启动辅助程序（需要本机装有 Chrome、Edge 或 Chromium）");
-  }
-  helper = proc;
-  // 告知 helper 离线库目录（插件自己的 dataDir/offline），下载与供流都用它。
-  try {
-    proc.write(JSON.stringify({ id: nextId++, op: "config", dir: host.dataDir + "/offline" }) + "\n");
-  } catch (e) {
-    // 起不来时下面的读取循环会收拾。
-  }
-  readyPromise = new Promise((res, rej) => {
-    readyResolve = res;
-    readyReject = rej;
-  });
-  (async () => {
-    for (;;) {
-      const line = await proc.readLine();
-      if (line === null) break;
-      let r;
-      try {
-        r = JSON.parse(line);
-      } catch (e) {
-        continue;
-      }
-      if (r.port) {
-        helperBase = `http://127.0.0.1:${r.port}`;
-        if (readyResolve) {
-          readyResolve(helperBase);
-          readyResolve = null;
-          readyReject = null;
-        }
-        continue;
-      }
-      const settle = pending.get(r.id);
-      if (settle) {
-        pending.delete(r.id);
-        settle(r);
-      }
-    }
-    if (helper === proc) helper = null;
-    helperBase = "";
-    if (readyReject) {
-      readyReject(new Error("辅助程序已退出"));
-      readyResolve = null;
-      readyReject = null;
-    }
-    for (const settle of pending.values()) settle({ error: "辅助程序已退出" });
-    pending.clear();
-  })();
-  return proc;
+async function api(params) {
+  await slot();
+  const qs = Object.entries(params)
+    .map(([k, v]) => `${k}=${enc(v)}`)
+    .join("&");
+  const r = await fetch(`${API}?${qs}`);
+  if (!r.ok) throw new Error("GD音乐台: 接口返回 " + r.status);
+  return await r.json();
 }
 
-// 等 helper 起好、浏览器初始化完、本地服务端口就绪。
-async function ready() {
-  ensureHelper();
-  if (!helperBase) await readyPromise;
-  return helperBase;
-}
-
-// 给 helper 发一条请求并等它的回复（按 id 配对）。下载较慢，超时可调。
-async function callHelper(payload, timeout = 25000) {
-  await ready();
-  const proc = helper;
-  const id = nextId++;
-  return await new Promise((resolve) => {
-    pending.set(id, resolve);
-    try {
-      proc.write(JSON.stringify({ id, ...payload }) + "\n");
-    } catch (e) {
-      pending.delete(id);
-      resolve({ error: String(e) });
-      return;
-    }
-    setTimeout(() => {
-      if (pending.has(id)) {
-        pending.delete(id);
-        resolve({ error: "请求超时" });
-      }
-    }, timeout);
-  });
-}
-
-async function api(query, sign) {
-  const resp = await callHelper({ query, sign });
-  if (resp.error) throw new Error("GD音乐台: " + resp.error);
-  if (resp.status === 401) throw new Error("GD音乐台: 站点校验失败，请重试");
-  if (resp.status !== 200) throw new Error("GD音乐台: 接口返回 " + resp.status);
-  return JSON.parse(resp.body);
-}
-
-const encodeId = (parts) => parts.map((p) => encodeURIComponent(String(p == null ? "" : p))).join("|");
+const encodeId = (parts) => parts.map((p) => enc(p)).join("|");
 const decodeId = (id) => id.split("|").map(decodeURIComponent);
 
-// 封面 URL 指向 helper 本地服务，App 抓它时才懒解析。
-const coverURL = (base, source, picId) =>
-  picId ? `${base}/cover?source=${encodeURIComponent(source)}&id=${encodeURIComponent(String(picId))}` : "";
+// 封面：pic_id → CDN 地址，持久缓存，避免重复消耗限频额度。
+const coverCache = () => load("covers", {});
 
-const toTrack = (t, source, base) => {
-  const ed = t.extra_data || {};
+async function resolveCover(source, picId) {
+  const key = source + ":" + picId;
+  const cache = coverCache();
+  if (cache[key]) return cache[key];
+  const r = await api({ types: "pic", source, id: picId, size: 500 });
+  const u = (r && r.url) || "";
+  if (u) {
+    const c = coverCache();
+    c[key] = u;
+    save("covers", c);
+  }
+  return u;
+}
+
+const toTrack = (t, source) => {
   const names = Array.isArray(t.artist) ? t.artist : String(t.artist || "").split(",");
-  const ids = ed.artist_ids || [];
   const src = t.source || source;
   return {
-    id: encodeId([src, t.url_id || t.id, t.pic_id || "", t.lyric_id || t.id]),
+    id: encodeId([src, t.id, t.pic_id || "", t.lyric_id || t.id]),
     name: String(t.name || ""),
-    artists: names.map((n, i) => ({ id: String(ids[i] || n), name: String(n).trim() })),
-    album: {
-      id: String(ed.album_id || ""),
-      name: String(t.album || ""),
-      imageUrl: coverURL(base, src, t.pic_id),
-    },
-    duration: (parseInt(ed.duration, 10) || 0) * 1000,
-    unavailable: ed.is_available === false,
+    artists: names.map((n) => ({ id: String(n), name: String(n).trim() })),
+    album: { id: "", name: String(t.album || ""), imageUrl: "" },
+    // 开发者 API 的搜索不返回时长，行内时长暂显未知。
+    duration: 0,
+    unavailable: false,
   };
 };
 
-// 歌曲库：把搜索见过的歌存下来，喜欢/歌单只存 id，渲染时据此还原。
-// addToPlaylist 只拿到 id，所以这里必须先记住歌曲元数据。
-// 封面端口每次启动会变，所以只存 source/pic_id，渲染时按当前端口重建 URL。
+// 搜索先回列表；封面用缓存即时填，未缓存的并发解析、限时补齐，
+// 超时未解出的留空（App 显示默认封面），下次渲染再补。
+async function fillCovers(tracks, raw, source) {
+  const cache = coverCache();
+  const todo = [];
+  tracks.forEach((tr, i) => {
+    const src = raw[i].source || source;
+    const pic = raw[i].pic_id;
+    tr.album.imageUrl = (pic && cache[src + ":" + pic]) || "";
+    if (pic && !tr.album.imageUrl) todo.push({ tr, src, pic });
+  });
+  if (!todo.length) return;
+  const deadline = Date.now() + 3000;
+  let idx = 0;
+  const worker = async () => {
+    while (idx < todo.length && Date.now() < deadline) {
+      const { tr, src, pic } = todo[idx++];
+      try {
+        const u = await resolveCover(src, pic);
+        if (u) tr.album.imageUrl = u;
+      } catch (e) {
+        // 封面失败不影响列表。
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(6, todo.length) }, worker));
+}
+
+// 歌曲库：搜索见过的歌存下来，喜欢/歌单/历史只存 id，渲染时据此还原。
 function referenced() {
   const s = new Set(load("liked", []));
   for (const p of load("playlists", [])) for (const id of p.trackIds || []) s.add(id);
   for (const id of load("history", [])) s.add(id);
-  for (const id of Object.keys(load("offline", {}))) s.add(id);
   return s;
 }
 
@@ -193,41 +138,29 @@ function remember(tracks) {
   save("songs", songs);
 }
 
-function songsByIds(base, ids) {
+function songsByIds(ids) {
   const songs = load("songs", {});
+  const cache = coverCache();
   const out = [];
   for (const id of ids) {
     const rec = songs[id];
     if (!rec) continue;
     const t = { ...rec.t, album: { ...rec.t.album } };
-    t.album.imageUrl = coverURL(base, rec.src, rec.pic);
+    t.album.imageUrl = (rec.pic && cache[rec.src + ":" + rec.pic]) || "";
     out.push(t);
   }
   return out;
 }
 
-// 渲染收藏/歌单时拿封面端口；helper 起不来就降级为无封面，列表照常显示。
-async function coverBase() {
-  try {
-    return await ready();
-  } catch (e) {
-    return "";
-  }
-}
-
 export async function search({ query, kind, offset }) {
   if (kind !== "tracks") throw fail("unsupported", "GD音乐台只支持搜索歌曲");
   const source = host.setting("source") || "netease";
-  const base = await ready();
   const page = Math.floor((offset || 0) / COUNT) + 1;
-  const enc = urlEncode(query);
-  const items = await api(
-    `types=search&count=${COUNT}&source=${source}&pages=${page}&name=${enc}`,
-    enc
-  );
+  const items = await api({ types: "search", source, name: query, count: COUNT, pages: page });
   if (!Array.isArray(items)) return { tracks: [], more: false };
   const valid = items.filter((t) => t && t.id);
-  const tracks = valid.map((t) => toTrack(t, source, base));
+  const tracks = valid.map((t) => toTrack(t, source));
+  await fillCovers(tracks, valid, source);
   remember(tracks);
   return { tracks, more: valid.length === COUNT };
 }
@@ -240,27 +173,15 @@ const extOf = (url, br) => {
 
 export async function stream({ id, quality }) {
   const br = BR[quality] || 320;
-  // 离线优先：已缓存且音质不低于所求，就由 helper 本地供流，断网也能播。
-  const rec = load("offline", {})[id];
-  if (rec && (rec.br || 0) >= br) {
-    try {
-      const base = await ready();
-      return { url: `${base}/audio?f=${encodeURIComponent(rec.name)}`, type: rec.ext, size: rec.size || 0 };
-    } catch (e) {
-      // helper 起不来就退回在线。
-    }
-  }
   const [source, urlId] = decodeId(id);
-  const enc = urlEncode(String(urlId));
-  const r = await api(`types=url&id=${enc}&source=${source}&br=${br}`, enc);
+  const r = await api({ types: "url", source, id: urlId, br });
   if (!r || !r.url || r.url === "err") throw fail("unavailable", "这首歌暂时无法播放");
   return { url: r.url, type: extOf(r.url, r.br || br), size: r.size || 0 };
 }
 
 export async function lyrics({ id }) {
   const [source, , , lyricId] = decodeId(id);
-  const enc = urlEncode(String(lyricId));
-  const r = await api(`types=lyric&id=${enc}&source=${source}`, enc);
+  const r = await api({ types: "lyric", source, id: lyricId });
   return { lrc: (r && r.lyric) || "", translation: (r && r.tlyric) || "" };
 }
 
@@ -283,11 +204,10 @@ export function isLiked({ ids }) {
 }
 
 export async function liked({ offset }) {
-  const base = await coverBase();
   const ids = load("liked", []);
   const start = offset || 0;
   return {
-    tracks: songsByIds(base, ids.slice(start, start + COUNT)),
+    tracks: songsByIds(ids.slice(start, start + COUNT)),
     more: start + COUNT < ids.length,
   };
 }
@@ -303,35 +223,31 @@ function changePlaylist(id, change) {
   save("playlists", all);
 }
 
-const withTracks = (p, base) => ({
+const withTracks = (p) => ({
   ...p,
-  tracks: songsByIds(base, p.trackIds || []),
+  tracks: songsByIds(p.trackIds || []),
   trackCount: (p.trackIds || []).length,
 });
 
-// 歌单封面用第一首歌的封面（懒加载 URL），App 各处以异步封面显示。
-const playlistCover = (base, p) => {
-  const first = songsByIds(base, (p.trackIds || []).slice(0, 1))[0];
+const playlistCover = (p) => {
+  const first = songsByIds((p.trackIds || []).slice(0, 1))[0];
   return first ? first.album.imageUrl : "";
 };
 
-// 侧栏列表：拿封面端口（helper 随之预热），封面 URL 交给 App 渐进加载。
 export async function playlists() {
-  const base = await coverBase();
   return playlistsNow().map((p) => ({
     id: p.id,
     name: p.name,
     mine: true,
     trackCount: (p.trackIds || []).length,
-    imageUrl: playlistCover(base, p),
+    imageUrl: playlistCover(p),
   }));
 }
 
 export async function playlist({ id }) {
   const p = playlistsNow().find((p) => p.id === id);
   if (!p) throw fail("unavailable", "歌单不存在");
-  const base = await coverBase();
-  return { ...withTracks(p, base), imageUrl: playlistCover(base, p) };
+  return { ...withTracks(p), imageUrl: playlistCover(p) };
 }
 
 export function createPlaylist({ name }) {
@@ -349,10 +265,8 @@ export function deletePlaylist({ id }) {
 }
 
 export function addToPlaylist({ id, trackIds }) {
-  let added = [];
   changePlaylist(id, (p) => {
     const have = new Set(p.trackIds || []);
-    // 查重：已在歌单里的、以及本批内重复的，都不重复添加。
     const add = [];
     for (const t of trackIds || []) {
       if (!have.has(t)) {
@@ -361,10 +275,7 @@ export function addToPlaylist({ id, trackIds }) {
       }
     }
     p.trackIds = [...(p.trackIds || []), ...add];
-    added = add;
   });
-  // 加入歌单即后台离线缓存（可在设置关闭）。不阻塞添加本身。
-  if (autoOffline()) for (const t of added) cacheSong(t);
 }
 
 export function removeFromPlaylist({ id, trackIds }) {
@@ -381,9 +292,7 @@ export function movePlaylistTrack({ id, from, to }) {
   });
 }
 
-// 听歌历史（本机）：App 每次开始播放回调 played({id})，把它记到最前、
-// 去掉旧的重复，最多留 HISTORY_MAX 条。recent 供 Home"最近播放"，
-// browse 的 history 页供侧栏"听歌历史"。歌曲元数据复用搜索记下的歌曲库。
+// 听歌历史（本机）。
 const HISTORY_MAX = 300;
 
 export function played({ id }) {
@@ -393,81 +302,17 @@ export function played({ id }) {
 }
 
 export async function recent() {
-  const base = await coverBase();
-  return songsByIds(base, load("history", []).slice(0, COUNT));
+  return songsByIds(load("history", []).slice(0, COUNT));
 }
 
 export async function browse({ page }) {
-  maybeClearOffline();
-  const base = await coverBase();
   if (page === "history") {
     const ids = load("history", []);
     return {
       title: "听歌历史",
       subtitle: ids.length ? `${ids.length} 首` : "",
-      sections: [{ tracks: songsByIds(base, ids), empty: "还没有播放记录，去搜首歌听听吧" }],
-    };
-  }
-  if (page === "offline") {
-    const off = load("offline", {});
-    const ids = Object.keys(off);
-    let bytes = 0;
-    for (const id of ids) bytes += off[id].size || 0;
-    const size = bytes >= 1 << 30 ? `${(bytes / (1 << 30)).toFixed(1)} GB` : `${Math.round(bytes / (1 << 20))} MB`;
-    return {
-      title: "离线缓存",
-      subtitle: ids.length ? `${ids.length} 首 · ${size}` : "",
-      sections: [{
-        tracks: songsByIds(base, ids),
-        empty: "还没有离线缓存的歌。把歌加入歌单就会自动缓存到本机（可在插件设置关闭）。",
-      }],
+      sections: [{ tracks: songsByIds(ids), empty: "还没有播放记录，去搜首歌听听吧" }],
     };
   }
   throw fail("unavailable", "没有这个页面");
-}
-
-// 离线缓存（本机）：加入歌单时后台把歌下载到插件自有目录，断网时由 helper
-// 本地供流播放。只存 id → 文件信息，歌曲元数据复用搜索记下的歌曲库。
-const autoOffline = () => host.setting("autoOffline") !== "false";
-const offlineQuality = () => host.setting("offlineQuality") || "high";
-
-// 清空离线缓存：开关打开后，下次进浏览页清一次（删文件 + 清记录）。
-// 插件改不了设置值，所以用边沿检测——再清需先把开关关掉再打开。
-function maybeClearOffline() {
-  const want = host.setting("clearOffline") === "true";
-  const seen = load("offlineCleared", false);
-  if (want && !seen) {
-    try {
-      host.removeDataDir("offline");
-    } catch (e) {
-      console.error("clear offline:", e);
-    }
-    save("offline", {});
-    save("offlineCleared", true);
-  } else if (!want && seen) {
-    save("offlineCleared", false);
-  }
-}
-
-async function cacheSong(id) {
-  try {
-    const off = load("offline", {});
-    const br = BR[offlineQuality()] || 320;
-    const rec = off[id];
-    if (rec && (rec.br || 0) >= br) return; // 查重：已有不低于此音质的缓存
-    const [source, urlId] = decodeId(id);
-    const enc = urlEncode(String(urlId));
-    const r = await api(`types=url&id=${enc}&source=${source}&br=${br}`, enc);
-    if (!r || !r.url || r.url === "err") return;
-    const ext = extOf(r.url, r.br || br);
-    const name = host.crypto.md5(id) + "." + ext;
-    const resp = await callHelper({ op: "dl", url: r.url, name }, 180000);
-    if (resp.error || resp.status !== 200) return;
-    const got = JSON.parse(resp.body);
-    const now = load("offline", {});
-    now[id] = { name, ext, size: got.size || 0, br: parseInt(r.br, 10) || br, ts: Date.now() };
-    save("offline", now);
-  } catch (e) {
-    console.error("offline cache:", e);
-  }
 }

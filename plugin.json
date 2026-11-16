@@ -1,62 +1,36 @@
 {
   "id": "gdstudio",
   "name": "GD音乐台",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "minAppVersion": "0.1.20",
   "main": "index.js",
   "playback": "stream",
   "navigation": [
     { "builtin": "home" },
     { "builtin": "liked" },
-    { "title": "听歌历史", "page": "history", "icon": "calendar" },
-    { "title": "离线缓存", "page": "offline", "icon": "star" }
+    { "title": "听歌历史", "page": "history", "icon": "calendar" }
   ],
   "permissions": {
-    "process": ["bin/gd-helper*"]
+    "network": ["music-api.gdstudio.xyz"]
   },
   "settings": [
     {
       "key": "source",
       "label": "音乐源",
       "type": "select",
-      "help": "搜索和播放使用的音源",
+      "help": "搜索和播放使用的音源。当前稳定可用：netease、joox、bilibili；其余源视站点开放情况。",
       "options": [
         { "value": "netease", "label": "网易云音乐" },
-        { "value": "kuwo", "label": "酷我音乐" },
-        { "value": "tencent", "label": "QQ音乐" },
-        { "value": "migu", "label": "咪咕音乐" },
-        { "value": "kugou", "label": "酷狗音乐" },
-        { "value": "ytmusic", "label": "YouTube Music" },
         { "value": "joox", "label": "JOOX" },
+        { "value": "bilibili", "label": "哔哩哔哩" },
+        { "value": "tencent", "label": "QQ音乐" },
+        { "value": "kuwo", "label": "酷我音乐" },
         { "value": "tidal", "label": "Tidal" },
         { "value": "qobuz", "label": "Qobuz" },
-        { "value": "deezer", "label": "Deezer" },
-        { "value": "spotify", "label": "Spotify" },
-        { "value": "apple", "label": "Apple Music" }
+        { "value": "apple", "label": "Apple Music" },
+        { "value": "ytmusic", "label": "YouTube Music" },
+        { "value": "spotify", "label": "Spotify" }
       ]
-    },
-    {
-      "key": "autoOffline",
-      "label": "加入歌单时自动离线缓存",
-      "type": "boolean",
-      "help": "开启后，加入歌单的歌会在后台下载到本机，断网也能听。默认开启。"
-    },
-    {
-      "key": "offlineQuality",
-      "label": "离线音质",
-      "type": "select",
-      "help": "自动离线缓存使用的音质",
-      "options": [
-        { "value": "standard", "label": "标准 128k" },
-        { "value": "high", "label": "高 320k" },
-        { "value": "lossless", "label": "无损 FLAC" }
-      ]
-    },
-    {
-      "key": "clearOffline",
-      "label": "清空离线缓存",
-      "type": "boolean",
-      "help": "打开后，下次进入「离线缓存」页会删除本机已下载的歌（只执行一次；要再清空请先关再开）。不影响歌单与喜欢。"
     }
   ]
 }

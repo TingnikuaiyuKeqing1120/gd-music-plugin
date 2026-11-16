@@ -1,12 +1,7 @@
-# stale build backups and half-downloaded files
-*.exe~
-*.part
-*.tmp
-
 # OS junk
 .DS_Store
 Thumbs.db
 
-# user data — never commit (likes, playlists, history, offline songs)
-offline/
+# user data — never commit (likes, playlists, history, cover cache)
 data/
+offline/
