@@ -55,32 +55,59 @@ const encodeId = (parts) => parts.map((p) => enc(p)).join("|");
 const decodeId = (id) => id.split("|").map(decodeURIComponent);
 
 // 封面：pic_id → CDN 地址，持久缓存，避免重复消耗限频额度。
+// 500 取不到退 300，再失败重试一次，尽量补齐。
 const coverCache = () => load("covers", {});
 
 async function resolveCover(source, picId) {
   const key = source + ":" + picId;
   const cache = coverCache();
   if (cache[key]) return cache[key];
-  const r = await api({ types: "pic", source, id: picId, size: 500 });
-  const u = (r && r.url) || "";
-  if (u) {
-    const c = coverCache();
-    c[key] = u;
-    save("covers", c);
+  for (const size of [500, 300]) {
+    try {
+      const r = await api({ types: "pic", source, id: picId, size });
+      const u = (r && r.url) || "";
+      if (u) {
+        const c = coverCache();
+        c[key] = u;
+        save("covers", c);
+        return u;
+      }
+    } catch (e) {
+      // 试下一档尺寸。
+    }
   }
-  return u;
+  return "";
+}
+
+// 时长：开发者 API 搜索不返回时长。播放拿到 size+br 后按码率估算并缓存，
+// 列表此后（含下次渲染/搜索）即显示时长。
+const durCache = () => load("durations", {});
+
+function rememberDuration(id, size, br) {
+  const kbps = parseInt(br, 10) || 0;
+  const bytes = parseInt(size, 10) || 0;
+  if (!kbps || !bytes) return;
+  const ms = Math.round((bytes * 8) / kbps);
+  const d = durCache();
+  d[id] = ms;
+  save("durations", d);
+  const songs = load("songs", {});
+  if (songs[id]) {
+    songs[id].t.duration = ms;
+    save("songs", songs);
+  }
 }
 
 const toTrack = (t, source) => {
   const names = Array.isArray(t.artist) ? t.artist : String(t.artist || "").split(",");
   const src = t.source || source;
+  const id = encodeId([src, t.id, t.pic_id || "", t.lyric_id || t.id]);
   return {
-    id: encodeId([src, t.id, t.pic_id || "", t.lyric_id || t.id]),
+    id,
     name: String(t.name || ""),
     artists: names.map((n) => ({ id: String(n), name: String(n).trim() })),
     album: { id: "", name: String(t.album || ""), imageUrl: "" },
-    // 开发者 API 的搜索不返回时长，行内时长暂显未知。
-    duration: 0,
+    duration: durCache()[id] || 0,
     unavailable: false,
   };
 };
@@ -97,7 +124,7 @@ async function fillCovers(tracks, raw, source) {
     if (pic && !tr.album.imageUrl) todo.push({ tr, src, pic });
   });
   if (!todo.length) return;
-  const deadline = Date.now() + 3000;
+  const deadline = Date.now() + 8000;
   let idx = 0;
   const worker = async () => {
     while (idx < todo.length && Date.now() < deadline) {
@@ -110,7 +137,7 @@ async function fillCovers(tracks, raw, source) {
       }
     }
   };
-  await Promise.all(Array.from({ length: Math.min(6, todo.length) }, worker));
+  await Promise.all(Array.from({ length: Math.min(8, todo.length) }, worker));
 }
 
 // 歌曲库：搜索见过的歌存下来，喜欢/歌单/历史只存 id，渲染时据此还原。
@@ -141,12 +168,14 @@ function remember(tracks) {
 function songsByIds(ids) {
   const songs = load("songs", {});
   const cache = coverCache();
+  const durs = durCache();
   const out = [];
   for (const id of ids) {
     const rec = songs[id];
     if (!rec) continue;
     const t = { ...rec.t, album: { ...rec.t.album } };
     t.album.imageUrl = (rec.pic && cache[rec.src + ":" + rec.pic]) || "";
+    t.duration = durs[id] || t.duration || 0;
     out.push(t);
   }
   return out;
@@ -176,6 +205,7 @@ export async function stream({ id, quality }) {
   const [source, urlId] = decodeId(id);
   const r = await api({ types: "url", source, id: urlId, br });
   if (!r || !r.url || r.url === "err") throw fail("unavailable", "这首歌暂时无法播放");
+  rememberDuration(id, r.size, r.br || br);
   return { url: r.url, type: extOf(r.url, r.br || br), size: r.size || 0 };
 }
 
