@@ -141,8 +141,8 @@ test('falls back to 300 only for an empty successful cover response', async () =
   assert.deepEqual(f.calls.filter(p=>p.types==='pic').map(p=>p.size), ['500','300']);
 });
 
-// Covers and searches used to exhaust the entire quota and leave playback waiting several minutes.
-test('reserves playback quota, enforces 50 per window and retains quota across reloads', async () => {
+// The server can raise its quota, so the local budget must leave playback eligible beyond 50 requests.
+test('limits auxiliary requests while allowing playback beyond 50 and after reload', async () => {
   const respond = p => json(p.types === 'search' ? Array.from({length:20},(_,i)=>song(p.name+i,p.name+i)) : p.types === 'pic' ? {url:'https://example.test/cover.jpg'} : {url:'https://example.test/song.mp3',br:320});
   const f = await fixture(respond);
   await search(f,'a');
@@ -152,13 +152,15 @@ test('reserves playback quota, enforces 50 per window and retains quota across r
   await assert.rejects(search(f,'over'), /请求额度/);
   for(let i=0;i<5;i++) await f.plugin.stream({id:trackID('s'+i),quality:'high'});
   assert.equal(f.calls.length,50);
-  await assert.rejects(f.plugin.stream({id:trackID('over'),quality:'high'}),/请求额度/);
-  const reloaded = await fixture(respond,Object.fromEntries(f.storage));
-  await assert.rejects(reloaded.plugin.stream({id:trackID('reload'),quality:'high'}),/请求额度/);
-  assert.equal(reloaded.calls.length,0);
-  await f.advance(300001);
-  await f.plugin.stream({id:trackID('after'),quality:'high'});
+  await f.plugin.stream({id:trackID('over'),quality:'high'});
   assert.equal(f.calls.length,51);
+  const reloaded = await fixture(respond,Object.fromEntries(f.storage));
+  await assert.rejects(search(reloaded,'still-limited'), /请求额度/);
+  await reloaded.plugin.stream({id:trackID('reload'),quality:'high'});
+  assert.equal(reloaded.calls.length,1);
+  await f.advance(300001);
+  await search(f,'after');
+  assert.equal(f.calls.filter(p=>p.types==='search').length,13);
 });
 
 // A 429 with Retry-After must stop other calls and remain actionable without waiting for the host timeout.
@@ -167,6 +169,7 @@ test('honors Retry-After and resumes after its deadline', async () => {
   const f = await fixture(() => ++count===1 ? json({},429,{'Retry-After':'90'}) : json([]));
   await assert.rejects(search(f),/HTTP 429.*90 秒/);
   await assert.rejects(search(f,'second'),/HTTP 429/);
+  await assert.rejects(f.plugin.stream({id:trackID('playing'),quality:'high'}),/HTTP 429/);
   assert.equal(f.calls.length,1);
   await f.advance(90001);
   await search(f);

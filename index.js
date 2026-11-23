@@ -1,7 +1,7 @@
 // GD音乐台 音源插件（纯 JS，无辅助程序）。
 // 走 GD Studio 官方开发者 API：https://music-api.gdstudio.xyz/api.php
 // 纯 HTTP GET、无签名、无需浏览器。出处：GD音乐台 (music.gdstudio.xyz)。
-// 该 API 限频 5 分钟 50 次，使用滚动窗口计数，并为搜索和播放预留额度。
+// 站方曾公布每 5 分钟 50 次。窗口计数用于降低辅助请求量，播放按服务端响应重试。
 //
 // 喜欢、歌单、历史保存在 host.storage，MyGo Music Plus 可同步这些数据。
 // 离线播放交给 App 自身的歌曲缓存与下载管理器，插件不再自有离线层。
@@ -12,8 +12,7 @@ const COUNT = 20;
 // 音质 → API 码率（128/192/320/740/999；999 为 24bit 无损）。
 const BR = { standard: 128, high: 320, lossless: 999 };
 
-// 开发者 API 限频：5 分钟 50 次。
-const RATE_MAX = 50;
+// 辅助请求使用 5 分钟预算，播放地址由服务端决定是否限流。
 const RATE_WINDOW = 300000;
 const COVER_LIMIT = 35;
 const FOREGROUND_LIMIT = 45;
@@ -49,10 +48,8 @@ function reserve(type) {
   const now = Date.now();
   rate.stamps = rate.stamps.filter((at) => now - at < RATE_WINDOW);
   if (rate.until > now) throw rateError(rate.until, rate.status);
-  let limit = FOREGROUND_LIMIT;
-  if (type === "pic") limit = COVER_LIMIT;
-  if (type === "url") limit = RATE_MAX;
-  if (rate.stamps.length >= limit) throw rateError(rate.stamps[rate.stamps.length - limit] + RATE_WINDOW, 0);
+  const limit = type === "pic" ? COVER_LIMIT : FOREGROUND_LIMIT;
+  if (type !== "url" && rate.stamps.length >= limit) throw rateError(rate.stamps[rate.stamps.length - limit] + RATE_WINDOW, 0);
   rate.stamps.push(now);
   save("requestCache", rate);
 }
