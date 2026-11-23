@@ -1,7 +1,7 @@
 {
   "id": "gdstudio",
   "name": "GD音乐台",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "minAppVersion": "0.1.20",
   "main": "index.js",
   "playback": "stream",
@@ -11,17 +11,35 @@
     { "title": "听歌历史", "page": "history", "icon": "calendar" }
   ],
   "permissions": {
-    "network": ["music-api.gdstudio.xyz"]
+    "network": ["music-api.gdstudio.xyz", "music.gdstudio.xyz", "music.gdstudio.org"]
   },
   "sync": {
-    "localKeys": ["covers", "coverCache", "durations", "requestCache"]
+    "localKeys": ["covers", "coverCache", "durations", "requestCache"],
+    "localSettings": ["service"]
   },
+  "links": [
+    { "label": "GD音乐台国际站", "url": "https://music.gdstudio.xyz/" },
+    { "label": "GD音乐台国内站", "url": "https://music.gdstudio.org/" },
+    { "label": "原作者 B 站 · GD-Studio", "url": "https://space.bilibili.com/13715770" },
+    { "label": "Embeat", "url": "https://github.com/gdstudio-org/Embeat", "description": "原作者开源的基于声学特征的音乐推荐系统" }
+  ],
   "settings": [
+    {
+      "key": "service",
+      "label": "服务线路",
+      "type": "select",
+      "help": "网页线路为实验功能，音源范围与可用性以站点为准。切换后用于新的搜索和播放请求。",
+      "options": [
+        { "value": "", "label": "开发者 API" },
+        { "value": "domestic", "label": "国内网页（实验）" },
+        { "value": "international", "label": "国际网页（实验）" }
+      ]
+    },
     {
       "key": "source",
       "label": "音乐源",
       "type": "select",
-      "help": "搜索和播放使用的音源。当前稳定可用：netease、joox、bilibili；其余源视站点开放情况。",
+      "help": "开发者 API 当前开放网易云、JOOX 和哔哩哔哩，网页线路可尝试其他音乐源。",
       "options": [
         { "value": "netease", "label": "网易云音乐" },
         { "value": "joox", "label": "JOOX" },

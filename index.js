@@ -1,12 +1,71 @@
 // GD音乐台 音源插件（纯 JS，无辅助程序）。
-// 走 GD Studio 官方开发者 API：https://music-api.gdstudio.xyz/api.php
-// 纯 HTTP GET、无签名、无需浏览器。出处：GD音乐台 (music.gdstudio.xyz)。
+// 开发者 API 与国内、国际网页线路。出处：GD音乐台 (music.gdstudio.xyz)。
 // 站方曾公布每 5 分钟 50 次。窗口计数用于降低辅助请求量，播放按服务端响应重试。
 //
 // 喜欢、歌单、历史保存在 host.storage，MyGo Music Plus 可同步这些数据。
 // 离线播放交给 App 自身的歌曲缓存与下载管理器，插件不再自有离线层。
 
+// GD Studio's public webpage checksum, inspected on 2026-11-23.
+// https://music.gdstudio.org/js/crc32.min.js?v=20261123
+// The site uses MD5 rounds with a different constant in round 58.
+// Signature input is ASCII: time, hostname, version and URL-encoded text.
+const shifts = [
+  7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22,
+  5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20,
+  4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
+  6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
+];
+const constants = Array.from({ length: 64 }, (_, i) => Math.floor(Math.abs(Math.sin(i + 1)) * 4294967296));
+constants[57] = 0x67b94013;
+
+function siteDigest(text) {
+  const length = Math.ceil((text.length + 9) / 64) * 64;
+  const bytes = new Uint8Array(length);
+  for (let i = 0; i < text.length; i++) bytes[i] = text.charCodeAt(i);
+  bytes[text.length] = 0x80;
+  const words = new DataView(bytes.buffer);
+  words.setUint32(length - 8, text.length * 8, true);
+  const state = [0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476];
+  for (let block = 0; block < length; block += 64) {
+    let [a, b, c, d] = state;
+    for (let i = 0; i < 64; i++) {
+      let mixed, word;
+      if (i < 16) {
+        mixed = (b & c) | (~b & d);
+        word = i;
+      } else if (i < 32) {
+        mixed = (d & b) | (~d & c);
+        word = (5 * i + 1) % 16;
+      } else if (i < 48) {
+        mixed = b ^ c ^ d;
+        word = (3 * i + 5) % 16;
+      } else {
+        mixed = c ^ (b | ~d);
+        word = (7 * i) % 16;
+      }
+      const sum = (a + mixed + constants[i] + words.getUint32(block + word * 4, true)) | 0;
+      const rotated = (sum << shifts[i]) | (sum >>> (32 - shifts[i]));
+      a = d;
+      d = c;
+      c = b;
+      b = (b + rotated) | 0;
+    }
+    state[0] = (state[0] + a) | 0;
+    state[1] = (state[1] + b) | 0;
+    state[2] = (state[2] + c) | 0;
+    state[3] = (state[3] + d) | 0;
+  }
+  return state.flatMap(word => [0, 8, 16, 24].map(shift => ((word >>> shift) & 255).toString(16).padStart(2, '0'))).join('');
+}
+
+function siteSignature(encoded, hostname, version, seconds) {
+  const release = version.split('.').map(part => part.padStart(2, '0')).join('');
+  return siteDigest(`${String(Math.floor(seconds)).slice(0, 9)}|${hostname}|${release}|${encoded}`).slice(-8).toUpperCase();
+}
+
 const API = "https://music-api.gdstudio.xyz/api.php";
+const SITES = { domestic: 'https://music.gdstudio.org', international: 'https://music.gdstudio.xyz' };
+const siteConfigs = new Map();
 const COUNT = 20;
 
 // 音质 → API 码率（128/192/320/740/999；999 为 24bit 无损）。
@@ -32,6 +91,13 @@ const searches = new Map();
 const rate = load("requestCache", { stamps: [], until: 0, status: 0 });
 
 const enc = (s) => encodeURIComponent(String(s == null ? "" : s));
+const siteEncode = (s) => enc(s).replace(/[!'()*]/g, ch => '%' + ch.charCodeAt(0).toString(16).toUpperCase());
+
+function serviceLine() {
+  const line = host.setting('service') || '';
+  if (line && !SITES[line]) throw fail('setup', '请在服务线路中选择开发者 API、国内网页或国际网页');
+  return line;
+}
 
 function rateError(until, status) {
   const seconds = Math.max(1, Math.ceil((until - Date.now()) / 1000));
@@ -54,15 +120,14 @@ function reserve(type) {
   save("requestCache", rate);
 }
 
-async function request(params, timeout) {
-  reserve(params.types);
-  const qs = Object.entries(params)
-    .map(([k, v]) => `${k}=${enc(v)}`)
-    .join("&");
+async function fetchBody(url, type, deadline, text = false) {
+  const timeout = deadline - Date.now();
+  if (timeout <= 0) throw fail('timeout', 'GD音乐台请求超时，请稍后重试');
+  reserve(type);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeout);
   try {
-    const r = await fetch(`${API}?${qs}`, { signal: controller.signal });
+    const r = await fetch(url, { signal: controller.signal });
     if (r.status === 403 || r.status === 429) {
       const retry = r.headers.get("Retry-After");
       let wait = r.status === 429 ? RATE_WINDOW : 60000;
@@ -76,8 +141,12 @@ async function request(params, timeout) {
       save("requestCache", rate);
       throw rateError(rate.until, r.status);
     }
-    if (!r.ok) throw new Error("GD音乐台接口返回 HTTP " + r.status);
-    return await r.json();
+    if (!r.ok) {
+      const error = new Error("GD音乐台接口返回 HTTP " + r.status);
+      error.status = r.status;
+      throw error;
+    }
+    return text ? await r.text() : await r.json();
   } catch (error) {
     if (controller.signal.aborted) throw fail("timeout", "GD音乐台请求超时，请稍后重试");
     throw error;
@@ -87,10 +156,57 @@ async function request(params, timeout) {
   }
 }
 
-async function api(params, timeout = 15000) {
-  const key = JSON.stringify(params);
+async function siteConfig(line, type, deadline) {
+  const cached = siteConfigs.get(line);
+  if (cached && cached.expiresAt > Date.now()) return cached.pending;
+  const base = SITES[line];
+  const pending = Promise.all([
+    fetchBody(base + '/js/player.js', type, deadline, true),
+    fetchBody(base + '/time', type, deadline, true).then(text => ({ seconds: Number(text.trim()), received: Date.now() })),
+  ]).then(([script, clock]) => {
+    const version = script.match(/\bversion\s*:\s*["'](\d{4}\.\d{1,2}\.\d{1,2})["']/)?.[1];
+    if (!version || !Number.isFinite(clock.seconds) || clock.seconds < 1000000000 || clock.seconds > 10000000000) {
+      throw fail('unavailable', 'GD音乐台网页协议信息读取失败，请切换服务线路后重试');
+    }
+    return { version, offset: clock.seconds * 1000 - clock.received };
+  });
+  const entry = { pending, expiresAt: Date.now() + 600000 };
+  siteConfigs.set(line, entry);
+  try {
+    return await pending;
+  } catch (error) {
+    if (siteConfigs.get(line) === entry) siteConfigs.delete(line);
+    throw error;
+  }
+}
+
+async function request(params, timeout, line) {
+  const deadline = Date.now() + timeout;
+  const encode = line ? siteEncode : enc;
+  const qs = Object.entries(params).map(([k, v]) => `${k}=${encode(v)}`).join('&');
+  if (!line) return fetchBody(`${API}?${qs}`, params.types, deadline);
+  const base = SITES[line];
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const config = await siteConfig(line, params.types, deadline);
+    const sign = siteSignature(encode(params.name ?? params.id), new URL(base).hostname, config.version, (Date.now() + config.offset) / 1000);
+    try {
+      const result = await fetchBody(`${base}/api.php?${qs}&s=${sign}`, params.types, deadline);
+      if (result?.url && !/^https?:\/\//i.test(result.url) && result.url !== 'err') {
+        result.url = new URL(result.url, base + '/').href;
+      }
+      return result;
+    } catch (error) {
+      if (error.status !== 401) throw error;
+      siteConfigs.delete(line);
+      if (attempt === 1) throw fail('unavailable', 'GD音乐台网页校验失败，请切换至开发者 API 或更新插件');
+    }
+  }
+}
+
+async function api(params, timeout = 15000, line = serviceLine()) {
+  const key = JSON.stringify([line, params]);
   if (requests.has(key)) return requests.get(key);
-  const pending = request(params, timeout);
+  const pending = request(params, timeout, line);
   requests.set(key, pending);
   try {
     return await pending;
@@ -105,8 +221,9 @@ const decodeId = (id) => id.split("|").map(decodeURIComponent);
 const coversPending = new Map();
 const coverCache = () => load("coverCache", {});
 
-function cachedCover(source, picId, cache = coverCache(), legacy = load("covers", {})) {
+function cachedCover(source, picId, cache = coverCache(), legacy = load("covers", {}), line = serviceLine()) {
   const key = source + ":" + picId;
+  if (line) return cache[line + ':' + key] || { url: '', expiresAt: 0, retryAt: 0 };
   return cache[key] || { url: legacy[key] || "", expiresAt: 0, retryAt: 0 };
 }
 
@@ -116,13 +233,13 @@ function saveCover(key, entry) {
   save("coverCache", cache);
 }
 
-async function fetchCover(source, picId, deadline, previous) {
-  const key = source + ":" + picId;
+async function fetchCover(source, picId, deadline, previous, line) {
+  const key = (line ? line + ':' : '') + source + ":" + picId;
   try {
     for (const size of [500, 300]) {
       const remaining = deadline - Date.now();
       if (remaining <= 0) break;
-      const r = await api({ types: "pic", source, id: picId, size }, remaining);
+      const r = await api({ types: "pic", source, id: picId, size }, remaining, line);
       const u = (r && r.url) || "";
       if (/^https?:\/\//i.test(u)) {
         saveCover(key, { url: u, expiresAt: Date.now() + COVER_TTL, retryAt: 0 });
@@ -137,12 +254,12 @@ async function fetchCover(source, picId, deadline, previous) {
   return previous.url;
 }
 
-async function resolveCover(source, picId, deadline) {
-  const key = source + ":" + picId;
-  const entry = cachedCover(source, picId);
+async function resolveCover(source, picId, deadline, line) {
+  const key = (line ? line + ':' : '') + source + ":" + picId;
+  const entry = cachedCover(source, picId, coverCache(), load('covers', {}), line);
   if (entry.expiresAt > Date.now() || entry.retryAt > Date.now()) return entry.url;
   if (coversPending.has(key)) return coversPending.get(key);
-  const pending = fetchCover(source, picId, deadline, entry);
+  const pending = fetchCover(source, picId, deadline, entry, line);
   coversPending.set(key, pending);
   try {
     return await pending;
@@ -173,14 +290,14 @@ const toTrack = (t, source) => {
 
 // The host has no incremental result callback. Bound the entire cover pass,
 // then retry missing/stale artwork when a list is opened again.
-async function fillCovers(tracks) {
+async function fillCovers(tracks, line = serviceLine()) {
   const cache = coverCache();
   const legacy = load("covers", {});
   const todo = [];
   tracks.forEach((tr) => {
     const [src, , pic] = decodeId(tr.id);
     if (!pic) return;
-    const entry = cachedCover(src, pic, cache, legacy);
+    const entry = cachedCover(src, pic, cache, legacy, line);
     tr.album.imageUrl = entry.url;
     if (entry.expiresAt <= Date.now() && entry.retryAt <= Date.now()) todo.push({ tr, src, pic });
   });
@@ -191,7 +308,7 @@ async function fillCovers(tracks) {
     while (idx < todo.length && Date.now() < deadline) {
       const { tr, src, pic } = todo[idx++];
       try {
-        const u = await resolveCover(src, pic, deadline);
+        const u = await resolveCover(src, pic, deadline, line);
         if (u) tr.album.imageUrl = u;
       } catch (e) {
         // 封面失败不影响列表。
@@ -253,13 +370,14 @@ async function hydratedSongs(ids) {
 export async function search({ query, kind, offset }) {
   if (kind !== "tracks") throw fail("unsupported", "GD音乐台只支持搜索歌曲");
   const source = host.setting("source") || "netease";
+  const line = serviceLine();
   const page = Math.floor((offset || 0) / COUNT) + 1;
-  const key = JSON.stringify([source, query, page]);
+  const key = JSON.stringify([line, source, query, page]);
   const cached = searches.get(key);
   let items;
   if (cached && cached.expiresAt > Date.now()) items = cached.items;
   else {
-    items = await api({ types: "search", source, name: query, count: COUNT, pages: page });
+    items = await api({ types: "search", source, name: query, count: COUNT, pages: page }, 15000, line);
     if (!Array.isArray(items)) throw new Error("GD音乐台返回了异常的搜索结果，请稍后重试");
     searches.delete(key);
     searches.set(key, { items, expiresAt: Date.now() + 120000 });
@@ -267,7 +385,7 @@ export async function search({ query, kind, offset }) {
   }
   const valid = items.filter((t) => t && t.id);
   const tracks = valid.map((t) => toTrack(t, source));
-  await fillCovers(tracks);
+  await fillCovers(tracks, line);
   remember(tracks);
   return { tracks, more: valid.length === COUNT };
 }

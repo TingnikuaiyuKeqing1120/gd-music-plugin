@@ -4,7 +4,7 @@ import test from 'node:test';
 import vm from 'node:vm';
 
 const source = await readFile(new URL('../index.js', import.meta.url), 'utf8');
-const json = (value, status = 200, headers = {}) => ({ ok: status === 200, status, headers: new Headers(headers), json: async () => value });
+const json = (value, status = 200, headers = {}) => ({ ok: status === 200, status, headers: new Headers(headers), json: async () => value, text: async () => typeof value === 'string' ? value : JSON.stringify(value) });
 const song = (id, pic = '') => ({ id, name: 'Song ' + id, artist: ['Artist'], album: 'Album', pic_id: pic });
 const trackID = (id, pic = '') => `netease|${id}|${pic}|${id}`;
 
@@ -15,13 +15,14 @@ async function fixture(respond, initial = {}) {
   const storage = new Map(Object.entries(structuredClone(initial)));
   const calls = [];
   let selectedSource = 'netease';
+  let service = '';
   class Clock extends Date { static now() { return clock; } }
   const context = vm.createContext({
-    Date: Clock, AbortController, console,
+    Date: Clock, AbortController, console, URL,
     setTimeout(fn, delay) { const id = ++sequence; timers.set(id, { fn, at: clock + delay }); return id; },
     clearTimeout(id) { timers.delete(id); },
     host: {
-      setting: () => selectedSource,
+      setting: key => key === 'service' ? service : selectedSource,
       storage: {
         get: key => structuredClone(storage.get(key)),
         set: (key, value) => storage.set(key, structuredClone(value)),
@@ -30,16 +31,17 @@ async function fixture(respond, initial = {}) {
     fetch: async (url, options) => {
       const params = Object.fromEntries(new URL(url).searchParams);
       calls.push(params);
-      return respond(params, options);
+      return respond(params, options, new URL(url));
     },
   });
-  const mod = new vm.SourceTextModule(source, { context });
+  const mod = new vm.SourceTextModule(source + '\nexport { siteDigest, siteSignature };', { context });
   await mod.link(() => { throw new Error('Unexpected dependency'); });
   await mod.evaluate();
   async function flush() { for (let i = 0; i < 100; i++) await Promise.resolve(); }
   return {
     plugin: mod.namespace, calls, storage,
     source(value) { selectedSource = value; },
+    service(value) { service = value; },
     async advance(milliseconds) {
       await flush();
       const target = clock + milliseconds;
@@ -220,4 +222,114 @@ test('keeps cached sources and pages separate',async()=>{
   f.source('joox');
   assert.equal((await search(f)).tracks[0].name,'Song joox1');
   assert.equal(f.calls.length,3);
+});
+
+// Website hash vectors include padding boundaries and multi-block requests.
+test('matches the website checksum across digest block boundaries', async () => {
+  const f = await fixture(() => json([]));
+  for (const [length, expected] of [
+    [0, 'a7dbeeca588aa82afb4799ae898842ad'],
+    [1, '92308d9b11a169f989f787c507afef6a'],
+    [55, 'ce9d64b93922b6c96372c47a3e6c3f05'],
+    [56, '339dca43f52297d05e559229d04109a3'],
+    [64, 'f7d0abd14bf991d63dac807850796834'],
+    [100, 'c18607ad0b16d35992e0f24f89d580d4'],
+  ]) assert.equal(f.plugin.siteDigest('a'.repeat(length)), expected);
+});
+
+// Changing service must preserve song identity while using that service's metadata and artwork.
+test('switches all API operations and isolates line caches while retaining user data', async () => {
+  const endpoints = [];
+  const f = await fixture((p, options, url) => {
+    endpoints.push(url);
+    if (url.pathname === '/js/player.js') return json('var mkPlayer={version:"2026.11.22"}');
+    if (url.pathname === '/time') return json('1795430000');
+    if (p.types === 'search') return json([song('1', 'pic')]);
+    if (p.types === 'pic') return json({url:`https://${url.hostname}/cover.jpg`});
+    if (p.types === 'lyric') return json({lyric:'line',tlyric:'translation'});
+    return json({url:'cache/song.flac',br:999});
+  });
+  const original = (await search(f)).tracks[0];
+  f.plugin.like({id:original.id,on:true});
+  const playlist = f.plugin.createPlaylist({name:'Keep'});
+  f.plugin.addToPlaylist({id:playlist.id,trackIds:[original.id]});
+  for (const [line, domain] of [['domestic','music.gdstudio.org'],['international','music.gdstudio.xyz']]) {
+    f.service(line);
+    const current = (await search(f, "晴天!'()*")).tracks[0];
+    assert.equal(current.id, original.id);
+    assert.equal(current.album.imageUrl, `https://${domain}/cover.jpg`);
+    const request = endpoints.filter(u=>u.hostname===domain && u.searchParams.get('types')==='search').at(-1);
+    const encoded = encodeURIComponent("晴天!'()*").replace(/[!'()*]/g,ch=>'%'+ch.charCodeAt(0).toString(16).toUpperCase());
+    assert.equal(request.searchParams.get('s'), f.plugin.siteSignature(encoded,domain,'2026.11.22',1795430000));
+    assert.equal((await f.plugin.stream({id:original.id})).url, `https://${domain}/cache/song.flac`);
+    assert.equal((await f.plugin.lyrics({id:original.id})).lrc, 'line');
+    assert.equal((await f.plugin.liked({offset:0})).tracks[0].id,original.id);
+    assert.equal((await f.plugin.playlist({id:playlist.id})).tracks[0].album.imageUrl,`https://${domain}/cover.jpg`);
+  }
+  const before = endpoints.length;
+  f.service('');
+  assert.equal((await search(f)).tracks[0].album.imageUrl,'https://music-api.gdstudio.xyz/cover.jpg');
+  assert.equal(endpoints.length,before);
+});
+
+// Version or server clock changes recover once, and a persistent rejection has a bounded retry.
+test('refreshes website metadata once on 401 and surfaces persistent rejection', async () => {
+  let requests = 0;
+  let revisions = 0;
+  const f = await fixture((p, options, url) => {
+    if (url.pathname === '/js/player.js') return json(`var mkPlayer={version:"2026.11.${22 + revisions++}"}`);
+    if (url.pathname === '/time') return json('1795430000');
+    return json(++requests === 2 ? [] : {}, requests === 2 ? 200 : 401);
+  });
+  f.service('domestic');
+  await search(f);
+  assert.equal(requests,2);
+  assert.equal(revisions,2);
+  await assert.rejects(search(f,'again'),/网页校验失败/);
+  assert.equal(requests,4);
+  assert.equal(revisions,3);
+});
+
+// A service switch during a slow search must not move its cover requests to the other host.
+test('pins in-flight results and artwork to their initiating service', async () => {
+  let release;
+  const endpoints = [];
+  const f = await fixture((p, options, url) => {
+    endpoints.push(url);
+    if (url.pathname === '/js/player.js') return json('var mkPlayer={version:"2026.11.22"}');
+    if (url.pathname === '/time') return json('1795430000');
+    if (p.types === 'search') return new Promise(resolve => { release=()=>resolve(json([song('1','pic')])); });
+    return json({url:`https://${url.hostname}/cover.jpg`});
+  });
+  f.service('domestic');
+  const pending = search(f);
+  await f.advance(0);
+  f.service('international');
+  release();
+  assert.equal((await pending).tracks[0].album.imageUrl,'https://music.gdstudio.org/cover.jpg');
+  assert.ok(endpoints.every(u=>u.hostname==='music.gdstudio.org'));
+});
+
+// Webpage setup is part of the request deadline and failed setup can be attempted again.
+test('bounds website initialization and keeps explicit service choices', async () => {
+  const f = await fixture((p,{signal}) => new Promise((resolve,reject) => {
+    signal.addEventListener('abort',()=>reject(new Error('aborted')));
+  }));
+  f.service('domestic');
+  const pending = assert.rejects(search(f),/请求超时/);
+  await f.advance(15000);
+  await pending;
+  assert.equal(f.calls.length,2);
+  f.service('unknown');
+  await assert.rejects(search(f),/服务线路/);
+  assert.equal(f.calls.length,2);
+});
+
+// Switching endpoints must honor the shared server cooldown rather than multiply refused requests.
+test('retains server backoff across service switches', async () => {
+  const f=await fixture(()=>json({},429,{'Retry-After':'120'}));
+  await assert.rejects(search(f),/HTTP 429/);
+  f.service('domestic');
+  await assert.rejects(search(f),/HTTP 429/);
+  assert.equal(f.calls.length,1);
 });

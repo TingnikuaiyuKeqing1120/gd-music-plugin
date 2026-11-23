@@ -1,12 +1,14 @@
 # GD音乐台 · MyGo Music 音源插件
 
-把 GD音乐台接进 MyGo Music 的音源插件。V2 使用纯 JavaScript，通过 GD Studio 开发者 API 提供歌曲搜索、播放、封面和歌词。[GD音乐台](https://music.gdstudio.xyz/) · [MyGo Music](https://github.com/egoist/mygo-music)
+把 GD音乐台接进 MyGo Music 的音源插件。V2 使用纯 JavaScript，提供开发者 API、国内网页和国际网页三种服务线路，支持歌曲搜索、播放、封面和歌词。[GD音乐台国际站](https://music.gdstudio.xyz/) · [国内站](https://music.gdstudio.org/) · [MyGo Music](https://github.com/egoist/mygo-music)
+
+音源服务由 GD Studio 提供。可以到作者 B 站了解更新，也可以关注其开源的 Embeat 音乐推荐系统。[原作者 B 站 · GD-Studio](https://space.bilibili.com/13715770) · [Embeat · 基于声学特征的音乐推荐系统](https://github.com/gdstudio-org/Embeat)
 
 > **出处与许可**：本插件使用 GD音乐台 (music.gdstudio.xyz) 的开发者 API，该 API 以 **CC BY-NC 4.0** 提供——**仅限学习、非商用**，使用时请注明出处「GD音乐台 (music.gdstudio.xyz)」。插件代码本身为 MIT。请遵守 API 与各自音源服务的条款，非商用、尊重作者。
 
 ## 版本选择
 
-- **V2 当前源码为 2.1.0**。适用于桌面和 Android/Web，包含请求合并、限流退避、封面缓存更新与本地列表补图。正式发布版本可在 releases 页查看。[发布页](https://github.com/TingnikuaiyuKeqing1120/gd-music-plugin/releases)
+- **V2 当前源码为 2.2.0，待发布**。新增国内、国际网页实验线路，保留 2.1.0 的请求合并、限流退避、封面缓存更新与本地列表补图。正式发布版本可在 releases 页查看。[发布页](https://github.com/TingnikuaiyuKeqing1120/gd-music-plugin/releases)
 - **V1 v1.0.0** 使用桌面 helper 与 Chrome/Edge/Chromium，提供网页接口字段、封面懒加载和插件离线缓存。当前网页接口与平台兼容性需要独立验证。[V1 发布页](https://github.com/TingnikuaiyuKeqing1120/gd-music-plugin/releases/tag/v1.0.0)
 
 ## 功能
@@ -20,7 +22,9 @@
 离线播放交给 **App 自身**的歌曲缓存与下载管理器（设置 › 歌曲缓存 / 下载按钮 / 已下载页），插件不再自有离线层。
 
 ## 环境要求
-- MyGo Music ≥ 0.1.20
+- MyGo Music ≥ 0.1.20 可使用基础插件能力
+- Android 网页线路需要播放器包含 `GDWebRequests` 原生请求桥接。作者链接展示、线路设置仅在本设备保存，需要播放器支持 `Info.links` 与 `sync.localSettings`
+- 普通浏览器 Web 版使用开发者 API，网页线路受站点 CORS 限制
 - 无需 Chrome / Edge / Go / 任何二进制
 
 ## 安装
@@ -29,14 +33,19 @@
 - 下载仓库 zip 后从文件夹安装；或
 - 把本目录放进 App 的 plugins 目录。
 
-首次使用需在插件设置里允许其网络权限（仅 `music-api.gdstudio.xyz`）。
+插件网络权限覆盖 `music-api.gdstudio.xyz`、`music.gdstudio.xyz` 和 `music.gdstudio.org`。
 
 ## 设置项
 | 键 | 说明 |
 | --- | --- |
-| `source` | 搜索与播放使用的音源（当前稳定：netease / joox / bilibili） |
+| `service` | 服务线路。空值使用开发者 API，`domestic` 使用国内网页，`international` 使用国际网页 |
+| `source` | 搜索与播放使用的音乐平台。开发者 API 当前开放 netease / joox / bilibili，网页线路可以尝试其他平台 |
 
-当前插件服务入口为 `music-api.gdstudio.xyz`。国内网页已有网易云搜索与地址解析成功样本，其 `api.php` 带网页校验，兼容 V2 的国内开发者入口仍待站方确认。双线路接入建议和网站音源获取机制已记录在调查文档中。[国内与国际线路调查](API-REQUESTS.md#国内与国际线路调查)
+首次使用继续选择开发者 API，可在「设置 → 插件 → GD音乐台 → 服务线路」手动切换。切换作用于新的请求，搜索与封面缓存按线路区分，歌单、喜欢、历史和歌曲 ID 沿用已有数据。新播放器将线路作为设备本地设置保存，手机和电脑可以使用不同线路。[国内与国际线路调查](API-REQUESTS.md#国内与国际线路调查)
+
+网页线路读取站点版本和服务器时间，在设备内计算公开网页使用的校验参数。初始化请求合并，版本和时钟偏差缓存 10 分钟，401 时在原请求期限内刷新一次并重试。元数据初始化也计入辅助请求预算。403/429 的等待状态由三条线路共用，保持明确的手动线路选择。
+
+2026-11-23 在 Windows 插件宿主和 Android 15 模拟器完成了两条网页线路验证。模拟器通过两端取得同一网易云样本的搜索结果、封面、歌词与地址，且在应用内完成原生播放。其他平台音源、真实手机网络及长期稳定性仍待验证。
 
 ## 开发者 API 约束（已内置应对）
 
@@ -77,8 +86,8 @@ MyGo Music Plus 内置副本位于 `internal/app/bundled/gdstudio`，更新插�
 ## 隐私
 - 喜欢、歌单和历史保存在 `host.storage`。MyGo Music Plus 的插件数据同步可将这些记录同步到用户配置的 GitHub 仓库。
 - 封面缓存、旧时长估算和请求计数在清单的 `sync.localKeys` 中声明为设备本地数据。
-- 网络权限仅指向 `music-api.gdstudio.xyz`；音频与封面由 App 直连各自 CDN。
-- 仓库源码不含任何密钥、cookie、token 或个人信息；API 无签名、无密钥。
+- API 和网页请求按选定线路发送到 GD 的三个指定域名，音频与封面由 App 连接返回的资源地址。Android 网页请求通过设备自身网络栈执行。
+- 开发者 API 使用普通 GET，网页线路校验使用公开的版本、时间和请求参数。
 
 ## 结构
 ```
