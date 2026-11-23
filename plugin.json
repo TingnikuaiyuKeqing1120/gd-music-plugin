@@ -1,7 +1,7 @@
 {
   "id": "gdstudio",
   "name": "GD音乐台",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "minAppVersion": "0.1.20",
   "main": "index.js",
   "playback": "stream",
@@ -12,6 +12,9 @@
   ],
   "permissions": {
     "network": ["music-api.gdstudio.xyz"]
+  },
+  "sync": {
+    "localKeys": ["covers", "coverCache", "durations", "requestCache"]
   },
   "settings": [
     {

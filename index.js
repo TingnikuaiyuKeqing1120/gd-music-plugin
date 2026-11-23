@@ -1,9 +1,9 @@
 // GD音乐台 音源插件（纯 JS，无辅助程序）。
 // 走 GD Studio 官方开发者 API：https://music-api.gdstudio.xyz/api.php
 // 纯 HTTP GET、无签名、无需浏览器。出处：GD音乐台 (music.gdstudio.xyz)。
-// 该 API 限频 5 分钟 50 次，故所有请求经令牌桶节流，封面解析结果持久缓存。
+// 该 API 限频 5 分钟 50 次，使用滚动窗口计数，并为搜索和播放预留额度。
 //
-// 喜欢、歌单、历史都存在本机（host.storage）：GD 无账号/写入接口，换机不同步。
+// 喜欢、歌单、历史保存在 host.storage，MyGo Music Plus 可同步这些数据。
 // 离线播放交给 App 自身的歌曲缓存与下载管理器，插件不再自有离线层。
 
 const API = "https://music-api.gdstudio.xyz/api.php";
@@ -15,20 +15,10 @@ const BR = { standard: 128, high: 320, lossless: 999 };
 // 开发者 API 限频：5 分钟 50 次。
 const RATE_MAX = 50;
 const RATE_WINDOW = 300000;
-let stamps = [];
-
-async function slot() {
-  for (;;) {
-    const now = Date.now();
-    stamps = stamps.filter((t) => now - t < RATE_WINDOW);
-    if (stamps.length < RATE_MAX) {
-      stamps.push(now);
-      return;
-    }
-    const wait = RATE_WINDOW - (now - stamps[0]) + 50;
-    await new Promise((r) => setTimeout(r, Math.min(wait, 5000)));
-  }
-}
+const COVER_LIMIT = 35;
+const FOREGROUND_LIMIT = 45;
+const COVER_BUDGET = 2500;
+const COVER_TTL = 24 * 60 * 60 * 1000;
 
 const fail = (code, message) => {
   const e = new Error(message);
@@ -38,106 +28,180 @@ const fail = (code, message) => {
 
 const load = (key, fallback) => host.storage.get(key) ?? fallback;
 const save = (key, value) => host.storage.set(key, value);
+const requests = new Map();
+const searches = new Map();
+const rate = load("requestCache", { stamps: [], until: 0, status: 0 });
 
 const enc = (s) => encodeURIComponent(String(s == null ? "" : s));
 
-async function api(params) {
-  await slot();
+function rateError(until, status) {
+  const seconds = Math.max(1, Math.ceil((until - Date.now()) / 1000));
+  let message = `GD音乐台请求额度暂时用尽，请 ${seconds} 秒后重试`;
+  if (status === 403) message = `GD音乐台拒绝访问（HTTP 403，可能触发限流或站点访问限制），请 ${seconds} 秒后重试`;
+  if (status === 429) message = `GD音乐台请求过于频繁（HTTP 429），请 ${seconds} 秒后重试`;
+  const error = fail("rateLimit", message);
+  error.retryAt = until;
+  return error;
+}
+
+// Reserve synchronously before fetch so concurrent requests share one budget.
+function reserve(type) {
+  const now = Date.now();
+  rate.stamps = rate.stamps.filter((at) => now - at < RATE_WINDOW);
+  if (rate.until > now) throw rateError(rate.until, rate.status);
+  let limit = FOREGROUND_LIMIT;
+  if (type === "pic") limit = COVER_LIMIT;
+  if (type === "url") limit = RATE_MAX;
+  if (rate.stamps.length >= limit) throw rateError(rate.stamps[rate.stamps.length - limit] + RATE_WINDOW, 0);
+  rate.stamps.push(now);
+  save("requestCache", rate);
+}
+
+async function request(params, timeout) {
+  reserve(params.types);
   const qs = Object.entries(params)
     .map(([k, v]) => `${k}=${enc(v)}`)
     .join("&");
-  const r = await fetch(`${API}?${qs}`);
-  if (!r.ok) throw new Error("GD音乐台: 接口返回 " + r.status);
-  return await r.json();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeout);
+  try {
+    const r = await fetch(`${API}?${qs}`, { signal: controller.signal });
+    if (r.status === 403 || r.status === 429) {
+      const retry = r.headers.get("Retry-After");
+      let wait = r.status === 429 ? RATE_WINDOW : 60000;
+      if (retry) {
+        const seconds = Number(retry);
+        const delay = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(retry) - Date.now();
+        if (Number.isFinite(delay) && delay > 0) wait = delay;
+      }
+      rate.until = Math.max(rate.until, Date.now() + wait);
+      rate.status = r.status;
+      save("requestCache", rate);
+      throw rateError(rate.until, r.status);
+    }
+    if (!r.ok) throw new Error("GD音乐台接口返回 HTTP " + r.status);
+    return await r.json();
+  } catch (error) {
+    if (controller.signal.aborted) throw fail("timeout", "GD音乐台请求超时，请稍后重试");
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    controller.abort();
+  }
+}
+
+async function api(params, timeout = 15000) {
+  const key = JSON.stringify(params);
+  if (requests.has(key)) return requests.get(key);
+  const pending = request(params, timeout);
+  requests.set(key, pending);
+  try {
+    return await pending;
+  } finally {
+    requests.delete(key);
+  }
 }
 
 const encodeId = (parts) => parts.map((p) => enc(p)).join("|");
 const decodeId = (id) => id.split("|").map(decodeURIComponent);
 
-// 封面：pic_id → CDN 地址，持久缓存，避免重复消耗限频额度。
-// 500 取不到退 300，再失败重试一次，尽量补齐。
-const coverCache = () => load("covers", {});
+const coversPending = new Map();
+const coverCache = () => load("coverCache", {});
 
-async function resolveCover(source, picId) {
+function cachedCover(source, picId, cache = coverCache(), legacy = load("covers", {})) {
   const key = source + ":" + picId;
-  const cache = coverCache();
-  if (cache[key]) return cache[key];
-  for (const size of [500, 300]) {
-    try {
-      const r = await api({ types: "pic", source, id: picId, size });
-      const u = (r && r.url) || "";
-      if (u) {
-        const c = coverCache();
-        c[key] = u;
-        save("covers", c);
-        return u;
-      }
-    } catch (e) {
-      // 试下一档尺寸。
-    }
-  }
-  return "";
+  return cache[key] || { url: legacy[key] || "", expiresAt: 0, retryAt: 0 };
 }
 
-// 时长：开发者 API 搜索不返回时长。播放拿到 size+br 后按码率估算并缓存，
-// 列表此后（含下次渲染/搜索）即显示时长。
-const durCache = () => load("durations", {});
+function saveCover(key, entry) {
+  const cache = coverCache();
+  cache[key] = entry;
+  save("coverCache", cache);
+}
 
-function rememberDuration(id, size, br) {
-  const kbps = parseInt(br, 10) || 0;
-  const bytes = parseInt(size, 10) || 0;
-  if (!kbps || !bytes) return;
-  const ms = Math.round((bytes * 8) / kbps);
-  const d = durCache();
-  d[id] = ms;
-  save("durations", d);
-  const songs = load("songs", {});
-  if (songs[id]) {
-    songs[id].t.duration = ms;
-    save("songs", songs);
+async function fetchCover(source, picId, deadline, previous) {
+  const key = source + ":" + picId;
+  try {
+    for (const size of [500, 300]) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      const r = await api({ types: "pic", source, id: picId, size }, remaining);
+      const u = (r && r.url) || "";
+      if (/^https?:\/\//i.test(u)) {
+        saveCover(key, { url: u, expiresAt: Date.now() + COVER_TTL, retryAt: 0 });
+        return u;
+      }
+    }
+  } catch (error) {
+    saveCover(key, { ...previous, retryAt: error.retryAt || Date.now() + 60000 });
+    return previous.url;
   }
+  saveCover(key, { ...previous, retryAt: Date.now() + 60000 });
+  return previous.url;
+}
+
+async function resolveCover(source, picId, deadline) {
+  const key = source + ":" + picId;
+  const entry = cachedCover(source, picId);
+  if (entry.expiresAt > Date.now() || entry.retryAt > Date.now()) return entry.url;
+  if (coversPending.has(key)) return coversPending.get(key);
+  const pending = fetchCover(source, picId, deadline, entry);
+  coversPending.set(key, pending);
+  try {
+    return await pending;
+  } finally {
+    coversPending.delete(key);
+  }
+}
+
+function durationOf(raw) {
+  const ms = Number(raw.duration_ms || (raw.extra_data || {}).duration * 1000);
+  return Number.isFinite(ms) && ms > 0 ? Math.round(ms) : 0;
 }
 
 const toTrack = (t, source) => {
   const names = Array.isArray(t.artist) ? t.artist : String(t.artist || "").split(",");
   const src = t.source || source;
   const id = encodeId([src, t.id, t.pic_id || "", t.lyric_id || t.id]);
+  const extra = t.extra_data || {};
   return {
     id,
     name: String(t.name || ""),
-    artists: names.map((n) => ({ id: String(n), name: String(n).trim() })),
-    album: { id: "", name: String(t.album || ""), imageUrl: "" },
-    duration: durCache()[id] || 0,
-    unavailable: false,
+    artists: names.map((n, i) => ({ id: String((extra.artist_ids || [])[i] || n), name: String(n).trim() })),
+    album: { id: String(extra.album_id || ""), name: String(t.album || ""), imageUrl: "" },
+    duration: durationOf(t),
+    unavailable: extra.is_available === false,
   };
 };
 
-// 搜索先回列表；封面用缓存即时填，未缓存的并发解析、限时补齐，
-// 超时未解出的留空（App 显示默认封面），下次渲染再补。
-async function fillCovers(tracks, raw, source) {
+// The host has no incremental result callback. Bound the entire cover pass,
+// then retry missing/stale artwork when a list is opened again.
+async function fillCovers(tracks) {
   const cache = coverCache();
+  const legacy = load("covers", {});
   const todo = [];
-  tracks.forEach((tr, i) => {
-    const src = raw[i].source || source;
-    const pic = raw[i].pic_id;
-    tr.album.imageUrl = (pic && cache[src + ":" + pic]) || "";
-    if (pic && !tr.album.imageUrl) todo.push({ tr, src, pic });
+  tracks.forEach((tr) => {
+    const [src, , pic] = decodeId(tr.id);
+    if (!pic) return;
+    const entry = cachedCover(src, pic, cache, legacy);
+    tr.album.imageUrl = entry.url;
+    if (entry.expiresAt <= Date.now() && entry.retryAt <= Date.now()) todo.push({ tr, src, pic });
   });
   if (!todo.length) return;
-  const deadline = Date.now() + 8000;
+  const deadline = Date.now() + COVER_BUDGET;
   let idx = 0;
   const worker = async () => {
     while (idx < todo.length && Date.now() < deadline) {
       const { tr, src, pic } = todo[idx++];
       try {
-        const u = await resolveCover(src, pic);
+        const u = await resolveCover(src, pic, deadline);
         if (u) tr.album.imageUrl = u;
       } catch (e) {
         // 封面失败不影响列表。
       }
     }
   };
-  await Promise.all(Array.from({ length: Math.min(8, todo.length) }, worker));
+  await Promise.all(Array.from({ length: Math.min(3, todo.length) }, worker));
 }
 
 // 歌曲库：搜索见过的歌存下来，喜欢/歌单/历史只存 id，渲染时据此还原。
@@ -152,7 +216,9 @@ function remember(tracks) {
   const songs = load("songs", {});
   for (const t of tracks) {
     const [src, , picId] = decodeId(t.id);
-    songs[t.id] = { t, src, pic: picId };
+    const previous = songs[t.id];
+    if (!t.duration && previous && previous.durationVerified) t.duration = previous.t.duration;
+    songs[t.id] = { t, src, pic: picId, durationVerified: t.duration > 0 };
   }
   const ref = referenced();
   const keys = Object.keys(songs);
@@ -168,28 +234,43 @@ function remember(tracks) {
 function songsByIds(ids) {
   const songs = load("songs", {});
   const cache = coverCache();
-  const durs = durCache();
+  const legacy = load("covers", {});
   const out = [];
   for (const id of ids) {
     const rec = songs[id];
     if (!rec) continue;
     const t = { ...rec.t, album: { ...rec.t.album } };
-    t.album.imageUrl = (rec.pic && cache[rec.src + ":" + rec.pic]) || "";
-    t.duration = durs[id] || t.duration || 0;
+    t.album.imageUrl = rec.pic ? cachedCover(rec.src, rec.pic, cache, legacy).url : "";
+    t.duration = rec.durationVerified ? t.duration : 0;
     out.push(t);
   }
   return out;
+}
+
+async function hydratedSongs(ids) {
+  const tracks = songsByIds(ids);
+  await fillCovers(tracks);
+  return tracks;
 }
 
 export async function search({ query, kind, offset }) {
   if (kind !== "tracks") throw fail("unsupported", "GD音乐台只支持搜索歌曲");
   const source = host.setting("source") || "netease";
   const page = Math.floor((offset || 0) / COUNT) + 1;
-  const items = await api({ types: "search", source, name: query, count: COUNT, pages: page });
-  if (!Array.isArray(items)) return { tracks: [], more: false };
+  const key = JSON.stringify([source, query, page]);
+  const cached = searches.get(key);
+  let items;
+  if (cached && cached.expiresAt > Date.now()) items = cached.items;
+  else {
+    items = await api({ types: "search", source, name: query, count: COUNT, pages: page });
+    if (!Array.isArray(items)) throw new Error("GD音乐台返回了异常的搜索结果，请稍后重试");
+    searches.delete(key);
+    searches.set(key, { items, expiresAt: Date.now() + 120000 });
+    if (searches.size > 10) searches.delete(searches.keys().next().value);
+  }
   const valid = items.filter((t) => t && t.id);
   const tracks = valid.map((t) => toTrack(t, source));
-  await fillCovers(tracks, valid, source);
+  await fillCovers(tracks);
   remember(tracks);
   return { tracks, more: valid.length === COUNT };
 }
@@ -205,8 +286,12 @@ export async function stream({ id, quality }) {
   const [source, urlId] = decodeId(id);
   const r = await api({ types: "url", source, id: urlId, br });
   if (!r || !r.url || r.url === "err") throw fail("unavailable", "这首歌暂时无法播放");
-  rememberDuration(id, r.size, r.br || br);
-  return { url: r.url, type: extOf(r.url, r.br || br), size: r.size || 0 };
+  // Only explicitly byte-denominated sizes are passed to the app. The legacy
+  // size field has an uncertain unit; HTTP supplies the actual transfer length.
+  const bytes = Number(r.size_bytes);
+  const result = { url: r.url, type: extOf(r.url, r.br || br), size: Number.isFinite(bytes) && bytes > 0 ? Math.round(bytes) : 0 };
+  if (Number(r.br) > 0) result.quality = Number(r.br) >= 740 ? "lossless" : Number(r.br) >= 320 ? "high" : "standard";
+  return result;
 }
 
 export async function lyrics({ id }) {
@@ -237,7 +322,7 @@ export async function liked({ offset }) {
   const ids = load("liked", []);
   const start = offset || 0;
   return {
-    tracks: songsByIds(ids.slice(start, start + COUNT)),
+    tracks: await hydratedSongs(ids.slice(start, start + COUNT)),
     more: start + COUNT < ids.length,
   };
 }
@@ -253,31 +338,24 @@ function changePlaylist(id, change) {
   save("playlists", all);
 }
 
-const withTracks = (p) => ({
-  ...p,
-  tracks: songsByIds(p.trackIds || []),
-  trackCount: (p.trackIds || []).length,
-});
-
-const playlistCover = (p) => {
-  const first = songsByIds((p.trackIds || []).slice(0, 1))[0];
-  return first ? first.album.imageUrl : "";
-};
-
 export async function playlists() {
-  return playlistsNow().map((p) => ({
+  const lists = playlistsNow();
+  const first = await hydratedSongs(lists.map((p) => (p.trackIds || [])[0]).filter(Boolean));
+  const covers = new Map(first.map((t) => [t.id, t.album.imageUrl]));
+  return lists.map((p) => ({
     id: p.id,
     name: p.name,
     mine: true,
     trackCount: (p.trackIds || []).length,
-    imageUrl: playlistCover(p),
+    imageUrl: covers.get((p.trackIds || [])[0]) || "",
   }));
 }
 
 export async function playlist({ id }) {
   const p = playlistsNow().find((p) => p.id === id);
   if (!p) throw fail("unavailable", "歌单不存在");
-  return { ...withTracks(p), imageUrl: playlistCover(p) };
+  const tracks = await hydratedSongs(p.trackIds || []);
+  return { ...p, tracks, trackCount: (p.trackIds || []).length, imageUrl: tracks[0]?.album.imageUrl || "" };
 }
 
 export function createPlaylist({ name }) {
@@ -332,7 +410,7 @@ export function played({ id }) {
 }
 
 export async function recent() {
-  return songsByIds(load("history", []).slice(0, COUNT));
+  return hydratedSongs(load("history", []).slice(0, COUNT));
 }
 
 export async function browse({ page }) {
@@ -341,7 +419,7 @@ export async function browse({ page }) {
     return {
       title: "听歌历史",
       subtitle: ids.length ? `${ids.length} 首` : "",
-      sections: [{ tracks: songsByIds(ids), empty: "还没有播放记录，去搜首歌听听吧" }],
+      sections: [{ tracks: await hydratedSongs(ids), empty: "还没有播放记录，去搜首歌听听吧" }],
     };
   }
   throw fail("unavailable", "没有这个页面");

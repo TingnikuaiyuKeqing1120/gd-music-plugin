@@ -1,20 +1,21 @@
 # GD音乐台 · MyGo Music 音源插件
 
-把 [GD音乐台](https://music.gdstudio.xyz/) 接进 [MyGo Music](https://github.com/egoist/mygo-music) 的音源插件。**纯 JavaScript，无辅助程序、无需浏览器**：直接调用 GD Studio 的[官方开发者 API](https://music-api.gdstudio.xyz/api.php)。
+把 GD音乐台接进 MyGo Music 的音源插件。V2 使用纯 JavaScript，通过 GD Studio 开发者 API 提供歌曲搜索、播放、封面和歌词。[GD音乐台](https://music.gdstudio.xyz/) · [MyGo Music](https://github.com/egoist/mygo-music)
 
 > **出处与许可**：本插件使用 GD音乐台 (music.gdstudio.xyz) 的开发者 API，该 API 以 **CC BY-NC 4.0** 提供——**仅限学习、非商用**，使用时请注明出处「GD音乐台 (music.gdstudio.xyz)」。插件代码本身为 MIT。请遵守 API 与各自音源服务的条款，非商用、尊重作者。
 
 ## 版本选择
-- **V1（[v1.0.0](https://github.com/TingnikuaiyuKeqing1120/gd-music-plugin/releases/tag/v1.0.0)）**：功能更稳定、全面、可靠，自带离线缓存与封面懒加载。**若不介意使用 helper（需本机装有 Chrome/Edge），推荐 V1。**
-- **V2（当前 main / [v2.0.0](https://github.com/TingnikuaiyuKeqing1120/gd-music-plugin/releases/tag/v2.0.0)）**：纯 JS、零依赖、最轻量；但时长需播放一次后回填、首搜个别封面可能暂缺、离线播放交给 App。
+
+- **V2 当前源码为 2.1.0**。适用于桌面和 Android/Web，包含请求合并、限流退避、封面缓存更新与本地列表补图。正式发布版本可在 releases 页查看。[发布页](https://github.com/TingnikuaiyuKeqing1120/gd-music-plugin/releases)
+- **V1 v1.0.0** 使用桌面 helper 与 Chrome/Edge/Chromium，提供网页接口字段、封面懒加载和插件离线缓存。当前网页接口与平台兼容性需要独立验证。[V1 发布页](https://github.com/TingnikuaiyuKeqing1120/gd-music-plugin/releases/tag/v1.0.0)
 
 ## 功能
 - 搜索歌曲（音源可选；当前稳定可用 netease / joox / bilibili）
 - 在线播放，音质可选（标准 128k / 高 320k / 无损）
 - 歌词（含翻译）
-- 喜欢、歌单（创建 / 改名 / 删除 / 增删 / 排序）——**存在本机**，GD 无账号接口，换机不同步
+- 喜欢、歌单（创建 / 改名 / 删除 / 增删 / 排序）保存于插件数据，MyGo Music Plus 开启插件数据同步后可跨端同步
 - 听歌历史、最近播放
-- 封面渐进补齐：解析结果持久缓存，列表先出、封面随后
+- 搜索、喜欢、歌单和历史页共用封面缓存，每次打开列表限时补齐缺图或刷新过期地址
 
 离线播放交给 **App 自身**的歌曲缓存与下载管理器（设置 › 歌曲缓存 / 下载按钮 / 已下载页），插件不再自有离线层。
 
@@ -36,13 +37,38 @@
 | `source` | 搜索与播放使用的音源（当前稳定：netease / joox / bilibili） |
 
 ## 开发者 API 约束（已内置应对）
-- **限频 5 分钟 50 次**：所有请求经令牌桶节流；封面解析结果持久缓存，重复不耗额度。
-- **封面**：`types=pic` 仅 300/500，取 500；搜索先回列表，未缓存封面并发限时补齐，超时留默认封面、下次渲染再补。
-- **时长**：开发者 API 搜索不返回时长，行内时长暂显未知（播放后 App 自知）。
-- **size**：接口返回字节数。
+
+开发者接口与说明入口为下方链接，后续排查和接口确认从这里开始。2026-11-23 按站方告知的 **5 分钟最多 50 次请求** 实现客户端限频。[GD Studio 开发者 API](https://music-api.gdstudio.xyz/api.php)
+
+| 功能 | 请求类型 | 主要参数 |
+| --- | --- | --- |
+| 搜索 | `types=search` | `source/name/count/pages` |
+| 播放地址 | `types=url` | `source/id/br` |
+| 封面 | `types=pic` | `source/id/size` |
+| 歌词 | `types=lyric` | `source/id` |
+
+- **请求额度**采用持久化滚动窗口。已用额度达到 35 次时暂停封面补齐，达到 45 次时暂停搜索和歌词请求，播放地址可使用剩余额度至 50 次。重复的进行中请求合并，最近 10 页搜索结果缓存 2 分钟。
+- **等待时间**由插件主动控制。普通 API 请求最多 15 秒，整次列表封面补齐最多 2.5 秒并发 3 路，超时会中止 HTTP 请求。宿主当前通过一次结果返回列表，缺图在再次打开列表时继续补齐。
+- **服务器退避**识别 429 和 403，并读取 `Retry-After` 的秒数或 HTTP 日期。未提供该头时，429 默认等待 5 分钟，403 默认等待 1 分钟。403 提示保留“可能限流或站点访问限制”，具体原因仍需响应或站方确认。额度不足会直接显示建议等待秒数。
+- **封面**先请求 500，仅在成功响应缺少 URL 时尝试 300。相同封面共用进行中的请求，URL 缓存 24 小时，失败退避至少 1 分钟，刷新暂时失败时继续使用已有 URL。
+- **时长**优先读取带明确单位的 `duration_ms`，并兼容网页额外字段 `extra_data.duration` 的秒数。未知时长显示未知，由播放器解码后获知。旧估算值退出列表显示，歌单和收藏 ID 继续保留。
+- **文件大小**仅把明确的 `size_bytes` 交给播放器。旧 `size` 字段单位待确认，下载以 HTTP 响应和实际文件长度为依据。音质采用响应里的实际档位。
+
+客户端计数覆盖本设备的插件请求。多设备、浏览器或其他客户端共享出口 IP 时，服务器可能更早限制请求。接口扩展需求与此前 V1/V2 调查保存在独立文档。[接口需求与对照](API-REQUESTS.md)
+
+## 验证
+
+以下测试使用 Node 内置测试框架和可控时钟，覆盖限频、超时取消、请求合并、缓存恢复和旧歌单数据读取。
+
+```powershell
+node --experimental-vm-modules --test tests/plugin.test.mjs
+```
+
+MyGo Music Plus 内置副本位于 `internal/app/bundled/gdstudio`，更新插件时同步 `index.js` 与 `plugin.json`，并运行播放器的插件宿主回归测试。
 
 ## 隐私
-- 喜欢、歌单、历史、封面缓存都只存**本机**（`host.storage`），不上传、无账号。
+- 喜欢、歌单和历史保存在 `host.storage`。MyGo Music Plus 的插件数据同步可将这些记录同步到用户配置的 GitHub 仓库。
+- 封面缓存、旧时长估算和请求计数在清单的 `sync.localKeys` 中声明为设备本地数据。
 - 网络权限仅指向 `music-api.gdstudio.xyz`；音频与封面由 App 直连各自 CDN。
 - 仓库源码不含任何密钥、cookie、token 或个人信息；API 无签名、无密钥。
 
