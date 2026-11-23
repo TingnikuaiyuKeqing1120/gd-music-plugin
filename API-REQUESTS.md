@@ -1,6 +1,6 @@
 # GD音乐台第三方客户端接口需求与 V1/V2 对照
 
-核对日期为 2026-11-23。客户端为 MyGo Music Plus，覆盖 Windows、macOS、Linux、Android 与 Web。V1/V2 对照基于 v1.0.0 和 v2.0.0，当前本地源码为待发布的 2.2.0。本文前两节可转交站长讨论，后续章节保留调查依据。
+核对日期为 2026-11-23。客户端为 MyGo Music Plus，覆盖 Windows、macOS、Linux、Android 与 Web。V1/V2 对照基于 v1.0.0 和 v2.0.0，当前插件版本为 2.2.0，配套播放器为 MyGo Music Plus 0.5.3。本文前两节可转交站长讨论，后续章节保留调查依据。
 
 开发者接口与说明地址已保留。2026-11-23 浏览器读取到的官方文档仍标注每 5 分钟 50 次，并将网易云、JOOX、B 站列为当前开放源。2.1.0 据此实现辅助请求预算及服务端退避。[GD Studio 开发者 API](https://music-api.gdstudio.xyz/api.php)
 

@@ -8,7 +8,7 @@
 
 ## 版本选择
 
-- **V2 当前源码为 2.2.0，待发布**。新增国内、国际网页实验线路，保留 2.1.0 的请求合并、限流退避、封面缓存更新与本地列表补图。正式发布版本可在 releases 页查看。[发布页](https://github.com/TingnikuaiyuKeqing1120/gd-music-plugin/releases)
+- **V2 当前版本为 2.2.0**。新增国内、国际网页实验线路，包含请求合并、限流退避、封面缓存更新与本地列表补图。[发布页](https://github.com/TingnikuaiyuKeqing1120/gd-music-plugin/releases/tag/v2.2.0)
 - **V1 v1.0.0** 使用桌面 helper 与 Chrome/Edge/Chromium，提供网页接口字段、封面懒加载和插件离线缓存。当前网页接口与平台兼容性需要独立验证。[V1 发布页](https://github.com/TingnikuaiyuKeqing1120/gd-music-plugin/releases/tag/v1.0.0)
 
 ## 功能
@@ -23,7 +23,7 @@
 
 ## 环境要求
 - MyGo Music ≥ 0.1.20 可使用基础插件能力
-- Android 网页线路需要播放器包含 `GDWebRequests` 原生请求桥接。作者链接展示、线路设置仅在本设备保存，需要播放器支持 `Info.links` 与 `sync.localSettings`
+- Android 网页线路、作者链接展示和线路设置仅在本设备保存，需要 MyGo Music Plus 0.5.3 及以上。播放器通过 `GDWebRequests`、`Info.links` 与 `sync.localSettings` 提供这些能力
 - 普通浏览器 Web 版使用开发者 API，网页线路受站点 CORS 限制
 - 无需 Chrome / Edge / Go / 任何二进制
 
